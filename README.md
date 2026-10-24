@@ -14,7 +14,7 @@ description: KiriKiri/吉里吉里引擎 Galgame 中文汉化回写方案（实�
 
 **把本文件整份复制，粘贴给任意一个 AI（Claude / GPT / 豆包 / 通义千问等），告诉它：**
 
-> "按照这个 skill 的步骤，帮我汉化这个 KiriKiri 游戏，游戏目录在 `D:\xxx`，翻译好的文本在 `D:\xxx\gt_output`。"
+> "按照这个 skill 的步骤，帮我汉化这个 KiriKiri 游戏，游戏目录在 `<游戏目录>`，翻译好的文本在 `<游戏目录>\gt_output`。"
 
 AI 会按照本文档的完整流程（解包 → 回写 → 隧道编码 → 重打包 → 部署）自动执行。
 
@@ -55,7 +55,7 @@ AI 会按照本文档的完整流程（解包 → 回写 → 隧道编码 → �
 ### 第 0 步：备份
 
 ```powershell
-Copy-Item "D:\游戏目录\data.xp3" "D:\游戏目录\data.xp3.bak"
+Copy-Item "<游戏目录>\data.xp3" "<游戏目录>\data.xp3.bak"
 ```
 
 ### 第 1 步：解包 data.xp3
@@ -186,11 +186,11 @@ KiriKiri 文字渲染走 D3D9，但 `d3d9.dll` 通常是**运行时 LoadLibrary 
 **正确做法**：直接把 VNTextProxy 目录里这几个 DLL 全复制到游戏目录：
 
 ```powershell
-Copy-Item "VNTextProxy\d3d9.dll"      "游戏目录\"   # 关键！hook D3D9 文字渲染
-Copy-Item "VNTextProxy\winmm.dll"     "游戏目录\"   # 代理
-Copy-Item "VNTextProxy\version.dll"   "游戏目录\"   # 备用加载入口
-Copy-Item "VNTextProxy\ddraw.dll"     "游戏目录\"   # 如有导入
-Copy-Item "sjis_ext.bin"              "游戏目录\"   # 隧道映射表
+Copy-Item "VNTextProxy\d3d9.dll"      "<游戏目录>\"   # 关键！hook D3D9 文字渲染
+Copy-Item "VNTextProxy\winmm.dll"     "<游戏目录>\"   # 代理
+Copy-Item "VNTextProxy\version.dll"   "<游戏目录>\"   # 备用加载入口
+Copy-Item "VNTextProxy\ddraw.dll"     "<游戏目录>\"   # 如有导入
+Copy-Item "sjis_ext.bin"              "<游戏目录>\"   # 隧道映射表
 ```
 
 - `d3d9.dll` 是文字 hook 的核心，**必须放**，不要因为导入表里没有就不放
