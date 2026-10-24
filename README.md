@@ -20,6 +20,20 @@ AI 会按照本文档的完整流程（解包 → 回写 → 隧道编码 → �
 
 ---
 
+## 🔧 环境准备
+
+汉化前需要准备以下工具：
+
+| 工具 | 用途 | 下载链接 |
+|---|---|---|
+| **VNTextPatch / VNTextProxy** | d3d9.dll 代理 hook，把隧道码位还原成中文 | https://github.com/arcusmaximus/VNTranslationTools/releases |
+| **Python 3** | 跑解包/回写/重打包脚本 | https://www.python.org/downloads/ |
+| **GalTransl** | 把日文剧本批量翻译成中文（可选，也可手动翻） | https://github.com/HIllya51/GalTransl |
+
+**VNTextProxy 部署要点**：下载后把 `d3d9.dll`、`winmm.dll`、`version.dll` 复制到游戏目录（详见第 6 步）。
+
+---
+
 ## 适用场景
 
 - 引擎：KiriKiri / KAG3（吉里吉里），data.xp3 打包
