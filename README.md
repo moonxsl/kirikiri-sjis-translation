@@ -15,6 +15,29 @@ description: KiriKiri/吉里吉里（KAG3）Galgame 中文汉化回写方案（�
 
 ---
 
+## ⚠️ 使用前提：必须先有 GalTransl 译文
+
+**本方案只负责「把中文写回游戏」，不负责翻译。** 动手之前，你手上必须有 GalTransl 的产物：
+
+```
+<游戏目录>\文本\
+├── gt_input\     ← 从游戏里提取出来的日文原文（JSON）
+└── gt_output\    ← GalTransl 翻好的中文（JSON）
+```
+
+**没有 `gt_output` 就没有中文可注入** —— `krr.py rewrite` 会直接退出，流程最多只能走到解包。这不是可选步骤，是硬前提。
+
+三步顺序，不能跳：
+
+1. **解包 + 提取文本** → [GalTransl-GalGameReverse-Skill](https://github.com/GalTransl/GalTransl-GalGameReverse-Skill)
+2. **翻译成中文** → [GalTransl](https://github.com/GalTransl/GalTransl)
+3. **回写 + 注入** → 本方案（`scripts/krr.py`）
+
+> 提取产出 `gt_input`，翻译吃 `gt_input` 产出 `gt_output`，本方案再吃 `gt_output`。
+> 缺任何一环，后面的隧道编码、重打包、代理部署都无从谈起。
+
+---
+
 ## 🚦 先判定，再动手
 
 照着做之前先确认这 5 条。任何一条不成立，后面的流程就会在错误的方向上消耗几小时。
@@ -75,7 +98,8 @@ python scripts/krr.py deploy  --game "D:\Game" --proxy-dir "D:\VNTextProxy"
 |---|---|---|
 | **VNTextProxy**（VNTranslationTools） | 代理 DLL，把隧道字节还原成中文 | https://github.com/arcusmaximus/VNTranslationTools/releases |
 | **Python 3** | 跑脚本（仅标准库，无需装包） | https://www.python.org/downloads/ |
-| **GalTransl** | 日文剧本批量翻译（也可手工翻） | https://github.com/HIllya51/GalTransl |
+| **GalTransl-GalGameReverse-Skill** | 解包游戏、把剧本提取成可翻译的 JSON（产出 `gt_input`） | https://github.com/GalTransl/GalTransl-GalGameReverse-Skill |
+| **GalTransl** | 日文剧本批量翻译（吃 `gt_input`，产出 `gt_output`；也可手工翻） | https://github.com/GalTransl/GalTransl |
 
 **代理 DLL 部署要点**：把 `d3d9.dll`、`winmm.dll`、`version.dll` 复制到游戏目录，`sjis_ext.bin` 必须和它们同级。
 「放哪几个」取决于引擎从哪条路加载——**本作**实测必须放 `d3d9.dll`（详见第 6 步）。
