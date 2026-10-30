@@ -1,13 +1,15 @@
 ---
 name: kirikiri-sjis-tunnel-guide
-description: KiriKiri/吉里吉里（KAG3）Galgame 中文汉化回写方案（实战验证版）。当 UIF/winmm hook 崩溃、patch.xp3 不加载、引擎硬编码 CP932 时使用。含适用性判定、失败症状速查、SJIS 隧道编码、单次 zlib 重打包与代理 DLL 部署。适用于 D3D9/GDI 渲染文字、自定义 KAG 方言的老 Krkr 游戏。
+description: SJIS 隧道汉化方案（跨引擎通用版）。适用于硬编码 CP932、无视 UTF-8/UTF-16 的日文老引擎：不改 exe、不换字体、不用 Locale Emulator，把中文塞进 CP932 的空档码位，再用代理 DLL 在绘制前还原。含适用性判定、引擎差异对照、失败症状速查、编码页伪装原理与两个实测案例（KiriKiri / NScripter）。
 ---
 
-# KiriKiri SJIS 隧道回写方案（实战验证版）
+# SJIS 隧道汉化方案（跨引擎通用版）
 
-> 本方案在《えすえむ学園～豊島優里花～》（`smg.exe` + `data.xp3`）上完整跑通，并在 2026-10 复现。
-> 与纯理论版的区别：下面每一条都是踩坑后修正的结论。
-> 但它同时是一个**单案例**文档：凡是标注「本作专属」的结论，换游戏必须重新验证。
+> **两个已实测跑通的引擎**：
+> - **KiriKiri / KAG3**：`smg.exe` + `data.xp3`，文字走 D3D9，代理入口 `d3d9.dll`
+> - **NScripter**：`noose.exe` + `nscript.dat`（XOR 0x84），文字走 GDI，代理入口 `winmm.dll` / `msacm32.dll`
+>
+> 办法是同一套，差别只在「从哪儿读文本、从哪儿拦绘制」——见「各引擎怎么落地」。
 
 **一句话**：不改引擎、不改 exe、不换字体，把中文塞进 CP932 里"正常文本永远不会生成"的字节对，再用一个代理 DLL 在绘制前把它们换回真汉字。
 
@@ -17,304 +19,270 @@ description: KiriKiri/吉里吉里（KAG3）Galgame 中文汉化回写方案（�
 
 ## ✅ 这套方法的优点
 
-- **不用 Locale Emulator / 不用转区**：不需要把系统区域设置改成日语，也不需要 LE、Ntleas 这类启动器或转码工具。中文 Windows 直接双击 `smg.exe` 就能玩。
-- **不改 exe、不注入游戏逻辑**：游戏程序本体一个字节都不动，只替换数据包里的文本、外加一个代理 DLL。
-- **不用换字体、不用补字库**：中文走引擎原有的渲染路径，不存在"豆腐块"（缺字）问题，也不需要改字体配置。
-- **排版完全不用调**：隧道字符占双字节、按全角计算，和日文原字等宽——换行、文本框宽度、行距全部沿用原设定，不会出现"中文溢出对话框"。
-- **完全可逆**：删掉代理 DLL + 还原 `data.xp3.bak`，100% 回到日文原版，不留残留、不污染系统。
-- **补丁机制失效时照样能用**：不需要 `patch.xp3`、也不需要读散文件，直接把主包重打一遍就行。
-- **纯本地离线**：除了翻译那一步，解包、回写、隧道编码、重打包、部署全部是本地 Python 标准库 + 一个 DLL，不上传任何东西。
+- **不用 Locale Emulator / 不用转区**：代理 DLL 已在进程内把「系统 ANSI 代码页」伪装成 932（`GetACP` 返回 932、`MultiByteToWideChar` 把 `CP_ACP` 当 932、`CreateFileA`/`LoadLibraryA` 等 A 系列 API 全部转 W 版），效果等同 LE，但不需要额外启动器，也不改系统设置。
+- **不改 exe、不注入游戏逻辑**：游戏程序本体一个字节都不动，只替换数据/脚本文件 + 一个代理 DLL。
+- **不用换字体、不用补字库**：中文在绘制前就被换成真汉字，不存在"豆腐块"（缺字）问题。
+- **排版完全不用调**：隧道字符占双字节、按全角计算，和日文原字等宽——换行、文本框宽度、行距全部沿用原设定。
+- **完全可逆**：删掉代理 DLL + 还原备份，就回到日文原版。
+- **补丁机制失效时照样能用**：不需要 `patch.xp3`、也不依赖读散文件，直接改主包/主脚本。
+- **纯本地离线**：解包、回写、隧道编码、重打包、部署全是本地 Python 标准库 + 一个 DLL。
 
-> 代价也说清楚：必须常驻一个代理 DLL，并依赖它命中文字渲染出口（见下面「先判定」第 3 条）——这是整套方案唯一可能失效的地方。
-
----
-
-## ⚠️ 使用前提：必须先有 GalTransl 译文
-
-**本方案只负责「把中文写回游戏」，不负责翻译。** 动手之前，你手上必须有 GalTransl 的产物：
-
-```
-<游戏目录>\文本\
-├── gt_input\     ← 从游戏里提取出来的日文原文（JSON）
-└── gt_output\    ← GalTransl 翻好的中文（JSON）
-```
-
-**没有 `gt_output` 就没有中文可注入** —— `krr.py rewrite` 会直接退出，流程最多只能走到解包。这不是可选步骤，是硬前提。
-
-三步顺序，不能跳：
-
-1. **解包 + 提取文本** → [GalTransl-GalGameReverse-Skill](https://github.com/GalTransl/GalTransl-GalGameReverse-Skill)
-2. **翻译成中文** → [GalTransl](https://github.com/GalTransl/GalTransl)
-3. **回写 + 注入** → 本方案（`scripts/krr.py`）
-
-> 提取产出 `gt_input`，翻译吃 `gt_input` 产出 `gt_output`，本方案再吃 `gt_output`。
-> 缺任何一环，后面的隧道编码、重打包、代理部署都无从谈起。
+> 代价：必须常驻一个代理 DLL，并依赖它命中文字绘制出口（见「先判定」第 3 条）——这是整套方案唯一可能失效的地方。
 
 ---
 
 ## 🚦 先判定，再动手
 
-照着做之前先确认这 5 条。任何一条不成立，后面的流程就会在错误的方向上消耗几小时。
+换一个引擎/游戏之前，先确认这 5 条。任何一条不成立，后面的流程都会在错误的方向上消耗几小时。
 
 | # | 检查 | 怎么查 | 不成立怎么办 |
 |---|---|---|---|
-| 1 | 归档能解开 | `python scripts/krr.py analyze --game <目录>` | 索引不是 zlib 明文（加密 XP3）→ 先解决解密（GARbro / KrkrExtract），本方案不涉及 |
-| 2 | 脚本真的是 CP932 | 解包出的 `.ks` 能用 `cp932` 解码 | 已经是 UTF-8/UTF-16 的引擎，**不要用隧道**，直接写 Unicode 更省事 |
+| 1 | 归档/脚本能解开 | 用对应引擎的解包工具，或直接 `file`/十六进制看魔数 | 加密归档 → 先解决解密（GARbro / KrkrExtract / 专用工具），本方案不涉及 |
+| 2 | 文本真的是 CP932 | 解出来的脚本能用 `cp932` 解码 | 已经是 UTF-8/UTF-16 的引擎，**不要用隧道**，直接写 Unicode 更省事 |
 | 3 | 绘制出口能被代理拦到 | 塞 3 个隧道汉字跑一次 | 见下方「30 分钟试跑」 |
 | 4 | 容量够 | 预计不重复汉字数 < **2726** | 长篇作品可能不够；扩第二字节区间或换方案 |
 | 5 | 文字不是画在图片里 | 打开游戏看菜单/标题 | 是图片 → 这套方案完全无效，得改图 |
 
 ### 30 分钟试跑（换新游戏必做）
 
-1. `krr.py analyze` 确认 XP3 明文可解析、`.ks` 条目正常。
-2. `krr.py unpack`，随手挑一个脚本，把其中一句日文换成两三个中文汉字（手动改，不用走全流程）。
-3. 用 `krr.py` 的编码逻辑打包，或者干脆手工按隧道规则替换，塞回 `data.xp3`（先备份！）。
-4. 放上 `d3d9.dll` + `sjis_ext.bin`，启动游戏，看到那句对白。
-5. 按「失败症状速查表」判读结果：
+1. 解包，确认脚本能用 `cp932` 解码。
+2. 随手挑一句对白，把那几个字换成两三个**中文汉字**（手动改，不用走全流程）。
+3. 用隧道规则编码后写回，重新封包/加密（**先备份！**）。
+4. 把代理 DLL 放进游戏目录 + 同级的 `sjis_ext.bin`，启动游戏。
+5. 按下面的症状表判读：
 
 | 看到什么 | 说明 | 下一步 |
 |---|---|---|
-| 正常中文 | 全链路通了 | 可以跑全量 |
-| 满屏奇怪日文/符号 | 隧道生效，但代理没 hook 到 | 换 `winmm.dll` / `version.dll` / `ddraw.dll` 逐个试；确认 DLL 位数与 exe 一致 |
+| **正常中文** | 全链路通了 | 可以跑全量 |
+| 满屏奇怪日文/符号 | 隧道生效，但代理没 hook 到 | 换另一个代理入口（见引擎表）；确认 DLL 位数与 exe 一致 |
 | 豆腐块 □ | 代理通了，字体缺字 | 换字体或补字 |
 | 直接崩溃/报错 | 引擎不容忍这些字节 | 这条路堵死，考虑改 exe 的 codepage 调用 |
+| `ANSI 文字列を UNICODE 文字列に変換できません` | 代理的 A→W hook 在缓冲区不足时 `return 0`，引擎当成失败 | 见「已知 bug」；临时可先缩小单行长度 |
 | 显示成正常日文里的生僻字 | 隧道没生效，字节被当合法 CP932 解了 | 检查首/末字节规则，或换一段不冲突的码位 |
 
 只有第 1 行才值得继续。
 
 ---
 
-## 🚀 使用方式
+## ⚠️ 使用前提：必须先有译文
 
-**方式 A：把本文件整份丢给 AI**，说：
+**本方案只负责「把中文写回游戏」，不负责翻译。** 动手之前必须有翻译好的文本：
 
-> "按照这个 skill 帮我汉化这个 KiriKiri 游戏，游戏目录在 `<游戏目录>`，翻译好的文本在 `<游戏目录>\gt_output`。"
-
-**方式 B：自己跑脚本**（`scripts/`，纯标准库，Python 3）：
-
-```powershell
-python scripts/krr.py analyze --game "D:\Game"                 # 看索引和条目
-python scripts/krr.py unpack  --game "D:\Game"                 # 解出 *.ks
-python scripts/extract.py     --game "D:\Game" --dry-run       # 看提取效果
-python scripts/extract.py     --game "D:\Game"                 # 生成 gt_input
-#   ……把 gt_input 交给 GalTransl（或手工翻译），产出 gt_output……
-python scripts/krr.py all     --game "D:\Game" --skip mcr_add  # 回写+打包+校验
-python scripts/krr.py deploy  --game "D:\Game" --proxy-dir "D:\VNTextProxy"
+```
+<工程目录>\
+├── gt_input\     ← 从游戏里提取出来的日文原文（JSON）
+└── gt_output\    ← 翻好的中文（JSON）
 ```
 
-`--work` 默认 `<游戏目录>\_work`，所有中间产物都在里面；`deploy` 之前不会动游戏目录。
+**没有 `gt_output` 就没有中文可注入**，流程最多只能走到解包。三步顺序不能跳：
+
+1. **解包 + 提取文本** → [GalTransl-GalGameReverse-Skill](https://github.com/GalTransl/GalTransl-GalGameReverse-Skill)
+2. **翻译成中文** → [GalTransl](https://github.com/GalTransl/GalTransl)
+3. **回写 + 注入** → 本方案
 
 ---
 
-## 🔧 环境准备
+## 🧠 原理
 
-| 工具 | 用途 | 下载链接 |
-|---|---|---|
-| **VNTextProxy**（VNTranslationTools） | 代理 DLL，把隧道字节还原成中文 | https://github.com/arcusmaximus/VNTranslationTools/releases |
-| **Python 3** | 跑脚本（仅标准库，无需装包） | https://www.python.org/downloads/ |
-| **GalTransl-GalGameReverse-Skill** | 解包游戏、把剧本提取成可翻译的 JSON（产出 `gt_input`） | https://github.com/GalTransl/GalTransl-GalGameReverse-Skill |
-| **GalTransl** | 日文剧本批量翻译（吃 `gt_input`，产出 `gt_output`；也可手工翻） | https://github.com/GalTransl/GalTransl |
+### 1）为什么要隧道
 
-**代理 DLL 部署要点**：把 `d3d9.dll`、`winmm.dll`、`version.dll` 复制到游戏目录，`sjis_ext.bin` 必须和它们同级。
-「放哪几个」取决于引擎从哪条路加载——**本作**实测必须放 `d3d9.dll`（详见第 6 步）。
+引擎只认 CP932。你给它 UTF-8/UTF-16，它按 CP932 去切字节，结果就是乱码；换字体、转 GBK、加 BOM 都没用——问题不在字库，在**它用什么规则解码**。
 
----
+### 2）借一段"永远不会出现"的字节
 
-## 适用场景
+CP932 是双字节编码：首字节落在 `0x81–0x9F` / `0xE0–0xEF` 时，引擎会再吃一个字节，当成**一个全角字符**。而正常日文的第二字节只会落在 `0x40–0x7E` / `0x80–0xFC`，所以 `0x01–0x3F` 这一段是文本里永远不会出现的空档（跳过 `\t \n \r 空格 逗号` 五个控制符）。
 
-以下条件**同时**成立时最顺：
+把中文放进去，引擎照单全收：不报错、不吞字、宽度按全角算，排版逻辑完全不用改。
 
-- 引擎：KiriKiri / KAG3，`data.xp3` 打包，索引是明文 zlib
-- 引擎硬编码 CP932，无视 UTF-8/UTF-16 BOM
-- 文字经 D3D9（或代理能拦到的 GDI 路径）渲染
-- 补丁机制不可用（本作 `patch.xp3` 不加载、也不读散文件）
-- 没有更便宜的入口（引擎不开源、不值得改 exe）
+- 首字节 47 个（`0x81–0x9F` 31 + `0xE0–0xEF` 16）
+- 第二字节 58 个（`0x01–0x3F` 去掉 5 个控制符）
+- **容量 2726 个不同汉字**
 
-反过来，碰到下面这些**不要用本方案**：引擎原生 UTF-16/UTF-8、能打 `patch.xp3`、能读散文件、文字在图片里、商业引擎有一键汉化工具。
+### 3）但引擎会照着号画"替身"
 
-## 核心原理
+所以还需要代理 DLL：在文字即将被绘制的那一刻，查 `sjis_ext.bin` 把码位换回真汉字，再交给真实绘制函数。
 
-1. **SJIS 隧道编码**：CP932 是双字节编码，首字节 `0x81–0x9F` / `0xE0–0xEF` 时引擎会再吃一个字节，当成**一个全角字符**。正常日文的第二字节只落在 `0x40–0x7E` / `0x80–0xFC`，所以 `0x01–0x3F` 这一段是"文本里永远不会出现"的空档。把中文放进这些空档，引擎照单全收，宽度按全角算，排版逻辑完全不用改。
-2. **VNTextProxy 代理 DLL**：它在文字绘制出口截获字节对，查 `sjis_ext.bin` 换回真汉字，再交给真实绘制函数。因为游戏看到的是"合法双字节"，所以不报错、不崩溃。
-3. **直接改 `data.xp3`**：不做 `patch.xp3`（本作 exe 写死只加载主包），只重打主包。
+`sjis_ext.bin` 的格式是**按隧道索引顺序排列的原始汉字**，UTF-16LE，大小 = 汉字数 × 2。
+**不是**码位字节对——写成字节对会导致整体错位，症状是"字全错"（比如「脏」变「饭」）。
 
-> ⚠️ 准确地说，隧道用的字节对**不是合法的 CP932 字符**，而是"CP932 解码器不会正常产出的组合"。引擎能不能容忍、会不会在解码阶段就把它们吞掉，**因引擎而异**——这就是为什么必须先做 30 分钟试跑。
+### 4）免 LE 的真相
 
-**容量**：首字节 47 个（`0x81–0x9F` 31 个 + `0xE0–0xEF` 16 个），第二字节 58 个（`0x01–0x3F` 去掉 5 个控制符），合计 **2726** 个不同汉字。
+很多日文游戏要 Locale Emulator，是因为它们用 `GetACP` / `MultiByteToWideChar(CP_ACP)` / `CreateFileA` 等**依赖系统代码页**的 API。中文 Windows 上是 936，日文就乱。
+
+VNTextProxy 在进程内把这些 API 全接管了（`GetACP` → 932、`CP_ACP` 当 932、A 系列 API 转 W 系列），等于**内置了一个 LE**。所以：
+
+> 不是"游戏不需要 LE"，而是"LE 的功能被内建进了代理 DLL"。
+
+删掉代理 DLL，游戏就回到需要 LE / 转区的状态。
 
 ---
 
-## 完整流程
+## 🧩 各引擎怎么落地
+
+同一套办法，每个引擎只需要替换三样东西：**归档格式、脚本格式、绘制出口**。
+
+| 引擎 | 文本存放 | 脚本编码 | 绘制出口 | 代理入口（实测/推测） | 状态 |
+|---|---|---|---|---|---|
+| **KiriKiri / KAG3** | `data.xp3`（zlib 索引） | `.ks`，CP932 | D3D9（运行时 `LoadLibrary`） | `d3d9.dll`（必需）+ `winmm/version/ddraw` | ✅ 实测跑通 |
+| **NScripter** | `nscript.dat`（XOR 0x84）+ `arc.nsa` | 单一脚本文本，CP932 | GDI `TextOutA` / `GetGlyphOutlineA` | `winmm.dll`、`msacm32.dll`（exe 实际导入的两个） | ✅ 实测跑通 |
+| RealLive / BGI / Majiro / Artemis / 自研 | 各自归档 | 多数 CP932 | GDI / D3D9 / DDraw | 看 exe 导入表 + 试 `winmm/version/ddraw/dinput8/msacm32` | ⚠️ 需自测 |
+| Unity / Ren'Py / KrkrZ | — | UTF-8/UTF-16 原生 | 自绘 / TextMeshPro | 无 hook 点 | ❌ 不适用 |
+
+**代理入口怎么选**：先看 exe 导入了哪些 DLL（`strings` 或 PE 导入表），再对照 VNTextProxy 目录里有的：`d3d9 / ddraw / dinput8 / winmm / msacm32 / version / d2d1 / xinput1_3`。
+KiriKiri 的 `d3d9.dll` 是**运行时动态加载**的，导入表里看不到，但必须放；NScripter 相反，按导入表放 `winmm` + `msacm32` 就够。
+
+---
+
+## 🛠 完整流程（以"改脚本+重封包"为主线）
 
 ### 第 0 步：备份
 
-```powershell
-Copy-Item "<游戏目录>\data.xp3" "<游戏目录>\data.xp3.bak"
-```
+原包 / 原脚本必须留档。带签名的包（如 `data.xp3.sig`）要把签名文件改名挪走，否则引擎校验失败会直接拒绝加载。
 
-### 第 1 步：解包 data.xp3
+### 第 1 步：解包 / 解密脚本
+
+- **KiriKiri**：XP3 结构见下，`scripts/krr.py analyze|unpack` 已实现
+- **NScripter**：`nscript.dat` 每字节 XOR `0x84`；`arc.nsa` 只放图片/音频
+- 其他引擎：用对应解包器，先确认脚本能 `cp932` 解码
 
 XP3 结构（实测）：
 
 - 偏移 `0x20`：uint64 LE，索引块偏移
-- 索引块：`flag(1B, 通常0x01)` + `comp_size(8B LE)` + `uncomp_size(8B LE)` + zlib 数据
-- 索引解压后是一串 `File` 条目：`'File'(4B) + data_size(8B LE) + data`
-- 每个 File 含三个子块：
+- 索引块：`flag(1B)` + `comp_size(8B)` + `uncomp_size(8B)` + zlib 数据
+- 索引解压后是一串 `File` 条目：`'File'(4B) + data_size(8B) + data`
   - **info**：`flags(4B) + usz(8B) + csz(8B) + name_len(2B) + name(UTF-16LE)`
   - **segm**：`seg_count(4B) + 每段 offset(8B) + usz(8B) + csz(8B)`
   - **adlr**：`adler32(4B)`
-- 注意：某些 ks 的 `flags=0`，数据其实仍是 zlib 压缩的（首字节 `0x78`）。**不要信 flags，看魔数**。
-
-`krr.py analyze` / `unpack` 已经实现这些；加密索引不在覆盖范围内。
 
 ### 第 2 步：提取对白
 
-对白结构（本作实测）：
+目标是拿到「原文 ↔ 译文」的有序对应。提取器要按引擎的脚本语法写：
 
-- 名单独行：`[locklink]【佐渡教官】[r]`
-- 对白行：`[PV file=..]「…」[/PV][unlocklink]` 或 `「…」[PG]`
-- 外层标签不要，中间正文才是 message
+- **KiriKiri**：`[PV file=..]「…」[/PV]`、`【名字】` 单独成行、`[ruby]` 等标签要剥掉
+- **NScripter**：一行就是一条文本，命令行以 ASCII 开头；`@`（分页/停顿）和 `\`（续行不换行）**必须保留**
 
-`extract.py` 会剥掉所有 `[tag]`、把 `【名字】` 单独放进 `name` 字段，输出 GalTransl 的 `gt_input/*.json`。**这是启发式提取**：只认"可选名字行 + 一行正文"这种形状，多行拼接、选项分支、`[ruby]` 之类需要按游戏补规则。
+### 第 3 步：回写（最容易翻车）
 
-两个必用的自检开关：
+四条硬规则，每条都踩过：
 
-- `--dry-run`：只打印不落盘，先抽查前几条
-- `--compare <已有 gt_input 目录>`：逐脚本对比条数，差得多的脚本说明提取规则不适配
+1. **行数不变**：替换不得增减换行——译文里带 `\n` 会把一行劈成两行，如果劈在 `[...]` 标签中间，引擎解析属性时直接报 ANSI 转换失败
+2. **标签不碰**：只替换"可见文本"，所有标签原样保留；替换时要做**括号深度检查**，不能从标签内部开始匹配
+3. **译文里的标签要清洗**：如果译文带了非 CP932 的字符进标签（比如 `[ruby text=中文]`），整条标签必须删掉，否则同样报转换错误
+4. **控制符保留**：NScripter 的 `@`/`\`、KiriKiri 的 `[r]`/`[PG]` 位置可以微调，但不能删
 
-> 本作实测：38 个剧情脚本**逐条数量全部一致**（2450 句），只有被跳过的 UI 宏脚本 `mcr_add` 多提取了 6 条——它本来就不参与回写。
+### 第 4 步：隧道编码
 
-### 第 3 步：容错正则回写（关键坑点）
-
-**坑**：ks 原文里句子中间夹着 `[ruby text=とげ]`、`[r]` 之类的标签，而 GalTransl 提取时把它们剥掉了，导致"日文子串"在 ks 里对不上。
-
-**做法**：字符之间允许夹任意标签或换行。
+只对 `cp932` 编不出来的字（含 `0xF0+` 用户定义区）走隧道，其余原样：
 
 ```python
-def tolerant_sub(text, needle, repl):
-    parts = [re.escape(ch) for ch in needle if ch not in '\r\n']
-    pat = r'(?:\[[^\[\]]*\]|\r?\n)*'.join(parts)
-    return re.subn(pat, lambda m: repl, text, count=1)
+idx = len(mapping); hi, lo = idx // 0x3A, idx % 0x3A
+hb = 0x81 + hi if hi < 0x1F else 0xE0 + (hi - 0x1F)
+lb = 1 + lo
+for s in (0x09, 0x0A, 0x0D, 0x20, 0x2C):
+    if lb >= s: lb += 1
 ```
 
-- needle 里的 `\n` 要去掉（容错组会吃掉换行）
-- 名字前缀 `【名】\n` 用 `re.compile(r'^【[^】]*】\n')` 剥掉
-- UI/宏脚本（如 `mcr_add.ks`，成就进度那种）跳过不译（`--skip mcr_add`）
-- 注意：匹配到的整段（含内联标签）会被替换掉，被吃掉的 `[ruby]` 不会保留——对本作无影响，介意就逐句核
+> 这套公式与 VNTextProxy 源码 `MappingIndexToTunnelChar` 完全一致（`0x3A = 0x40 - 5 - 1`），已核对。
 
-### 第 4 步：SJIS 隧道编码
+### 第 5 步：封包 / 重新加密
 
-```python
-class SjisTunnel:
-    def _get(self, ch):
-        idx = len(self._mapping)
-        hi, lo = idx // 0x3A, idx % 0x3A
-        hb = 0x81 + hi if hi < 0x1F else 0xE0 + (hi - 0x1F)
-        lb = 1 + lo
-        for s in (0x09, 0x0A, 0x0D, 0x20, 0x2C):   # 跳过控制符/空白/逗号
-            if lb >= s: lb += 1
-        return chr((hb << 8) | lb)
-```
+- **KiriKiri**：新 ks 已经是 `zlib.compress(隧道字节)`，**绝对不能再压一次**；`usz` 用解压后长度、`csz` 用压缩长度；索引重写后回填 `0x20`
+- **NScripter**：脚本字节整体 XOR `0x84` 写回 `nscript.dat`，行数必须和原文一致
 
-- 只对 `cp932` 编不出来的字（含 `0xF0+` 用户定义区）走隧道
-- 原样能编的字保持原样，避免体积膨胀
-- **`sjis_ext.bin` 格式**：按隧道索引顺序排列的**原始汉字**，UTF-16LE，大小 = 汉字数 × 2
-  （例：612 汉字 = 1224 字节）
-- **不是**码位字节对。写成字节对会导致整体错位，症状是"字全错"，比如「脏」变「饭」
-- 映射顺序必须和编码时一致：它是按**首次出现顺序**分配的，同一次翻译结果可复现
+> ⚠️ **adler32 基准**：XP3 的 `adlr` 规范上是**解压后明文**的 adler32。有些实现（含本仓库早期版本）写在压缩数据上——本作不校验所以能跑，但遇到校验严格的引擎会读失败。移植时按明文算。
 
-### 第 5 步：重打包（双重压缩坑点）
-
-**最致命的坑**：第 4 步输出的 ks 已经是 `zlib.compress(隧道字节)`，第 5 步**绝对不能再压**。否则游戏解压一次拿到的还是 zlib 流，整篇乱码，而且症状像编码错误，会把人带偏。
-
-正确做法：直接拿压缩字节当 segm 数据，`usz` 用解压后长度，`csz` 用压缩长度，`adler32` 算在**压缩数据**上。
-
-```python
-comp = open(new_ks_path, 'rb').read()
-raw  = zlib.decompress(comp)          # 只为取长度
-info_usz, info_csz = len(raw), len(comp)
-segm_offset, segm_usz, segm_csz = cur, len(raw), len(comp)
-adler = zlib.adler32(comp) & 0xFFFFFFFF
-```
-
-新文件布局：
-
-1. 原样拷贝原 xp3 的 `[0, index_offset)` 段（旧 ks 变死数据，浪费空间但无害）
-2. 追加所有新 ks 的压缩数据
-3. 写新索引块：`0x01` + `comp_size` + `uncomp_size` + `zlib.compress(索引)`
-4. 回到 `0x20` 回填新索引偏移
-
-> 多段文件（`seg_count > 1`）我的实现只重写第 0 段，`analyze` 会告警。真遇到要先扩展。
-
-### 第 6 步：部署代理 DLL
-
-**最大的坑（本作专属，但教训通用）**：不要只按 exe 的静态导入表选 DLL。KiriKiri 的文字渲染走 D3D9，而 `d3d9.dll` 往往是**运行时 `LoadLibrary`** 加载的，导入表里看不到。只放 `ddraw.dll` + `winmm.dll` 的结果是 hook 完全没生效、满屏乱码。
-
-本作实测有效的最小集合：
+### 第 6 步：部署代理 + 映射表
 
 ```powershell
-Copy-Item "<代理目录>\d3d9.dll"    "<游戏目录>\"   # 关键
-Copy-Item "<代理目录>\winmm.dll"   "<游戏目录>\"   # 备用入口
-Copy-Item "<代理目录>\version.dll" "<游戏目录>\"   # 备用入口
-Copy-Item "<代理目录>\ddraw.dll"   "<游戏目录>\"   # 如有导入
-Copy-Item "_work\sjis_ext.bin"     "<游戏目录>\"   # 隧道映射表
+Copy-Item "<VNTextProxy>\d3d9.dll"    "<游戏目录>\"   # KiriKiri 必需
+Copy-Item "<VNTextProxy>\winmm.dll"   "<游戏目录>\"   # NScripter 入口
+Copy-Item "<VNTextProxy>\msacm32.dll" "<游戏目录>\"   # NScripter 备用
+Copy-Item "sjis_ext.bin"              "<游戏目录>\"   # 必须与 DLL 同级
 ```
 
-- `d3d9.dll` 是文字 hook 的核心，**不要因为导入表里没有就不放**
-- `sjis_ext.bin` 必须与 DLL 同目录
 - DLL 位数必须和 exe 一致（32 位游戏配 32 位 DLL）
+- `sjis_ext.bin` 每次重新编码都要重新生成，**不能跨游戏/跨版本复用**
 
 ### 第 7 步：运行验证
 
-- 窗口/全屏都应正常，不需要 Locale Emulator
-- 标题菜单仍是日文（没翻译的脚本/图片），进入对话后对白应为中文
-- 异常判读见前面「失败症状速查表」
+- 对白应为中文；标题/菜单可能仍是日文（没翻译的脚本/图片）
+- 异常判读见前面症状表
 
 ---
 
-## 死路（不要重复试）
+## 📊 两个案例的实测数据
+
+| | KiriKiri《えすえむ学園》 | NScripter《The noose》 |
+|---|---|---|
+| 归档 | `data.xp3` 490 MB / 911 条目 | `nscript.dat` 118 KB（XOR 0x84）+ `arc.nsa` 25 MB |
+| 脚本 | 59 个 `.ks` / CP932 | 4,377 行 / CP932 |
+| 对白 | 2,450 句 | 1,091 句 / 41,924 字 |
+| 隧道汉字 | 612（`sjis_ext.bin` 1,224 B） | 152（304 B，首批 100 句） |
+| 代理入口 | `d3d9/winmm/version/ddraw` | `winmm/msacm32` |
+| 结果 | 全量中文，实机通过 | 首批 100 句中文，实机通过 |
+
+---
+
+## 🕳 死路（不要重复试）
 
 | 方案 | 结果 | 适用范围 |
 |---|---|---|
-| UTF-8 BOM / UTF-16LE BOM | 引擎无视 BOM，乱码 | 通用（CP932 硬编码的引擎） |
+| UTF-8 BOM / UTF-16LE BOM | 引擎无视 BOM，乱码 | 通用 |
 | GBK 全量转换 | 引擎强制 CP932，乱码 | 通用 |
 | 换字体补字 | 只解决"豆腐块"，不解决编码 | 通用 |
-| UIF winmm + TextOutA/W | D3D9 绕过 GDI，拦不到 | 通用 |
-| UIF + ExtTextOutW / GetGlyphOutlineW | EAccessViolation 崩溃 | 本作实测 |
-| UIF tunnel_decoder hook MultiByteToWideChar | EAccessViolation 崩溃 | 本作实测 |
-| `patch.xp3` 补丁包 | 本作 exe 写死只加载 `data.xp3` | **本作专属**（多数游戏反而优先用它） |
-| `scenario/` 散文件 | 本作不读散文件 | **本作专属** |
-| 只按静态导入表放 DLL | `d3d9.dll` 动态加载，hook 失效 | 通用教训（凡动态加载的引擎） |
-| repack 时对已压缩 ks 再 `zlib.compress` | 双层压缩，全乱码 | 通用 |
+| 按静态导入表选代理 DLL | 动态加载的引擎（如 KiriKiri 的 d3d9）会漏 | 通用教训 |
+| 全拷贝所有代理 DLL | 多余入口可能引入副作用，按导入表来 | 通用 |
+| repack 时对已压缩数据再压一次 | 双层压缩，全乱码 | 通用 |
+| 替换时跨越换行/吞掉标签 | 行结构被破坏 → 解析报错 | 通用 |
+| 只改 `patch.xp3` 而不动主包 | 某些 exe 写死只加载 `data.xp3` | 案例专属 |
+| 直接放 `scenario/` 散文件 | 某些引擎不读散文件 | 案例专属 |
 
 ---
 
-## 本方案治不了什么
+## 🚫 治不了什么
 
 | 范围 | 说明 |
 |---|---|
 | 图片文字 | 标题、按钮、CG 里的字是像素，只能改图 |
-| 未覆盖的脚本 | 只替换 `gt_output` 里有译文的脚本；菜单/UI 脚本（`pge_*.ks`、`lay_conf.ks`、`first.ks`…）要单独提取翻译 |
-| 引擎层文字（`tjs` 里写死的） | 不在 `.ks` 里，本流程不处理 |
-| 字体级排版 | 个别字在三字节/全角宽度假设下可能错位，极少见 |
+| 未翻译的脚本 | 只替换有译文的文件；菜单/UI 要单独提取翻译 |
+| 引擎内置字符串（如 tjs 里写死的） | 不在脚本文件里，本流程不处理 |
+| Unicode 原生引擎 | 不需要隧道，直接写 Unicode |
 
 ---
 
-## 验证清单
+## 🐞 已知 bug（VNTextProxy）
 
-- [ ] `data.xp3.bak` 已备份
-- [ ] `analyze` 无 "multi-segment" 告警
-- [ ] 回写报告：未找到条目 = 0
-- [ ] `new_ks` 解压后明文长度 == 索引 `info.usz`
-- [ ] `sjis_ext.bin` 大小 == 汉字数 × 2，UTF-16LE，顺序与编码一致
-- [ ] `verify` 报告：长度/压缩不一致 = 0，残留假名行 = 0
-- [ ] `d3d9.dll` 已放入游戏目录（不要管静态导入表）
+`Win32AToWAdapter::MultiByteToWideCharHook` 在缓冲区不足时直接 `return 0`：
+
+```cpp
+if (cchWideChar < numWchars) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return 0; }
+```
+
+引擎收到 0 就抛「ANSI 文字列を UNICODE 文字列に変換できません」。表现是"汉化到某一段突然报错"，跟文本内容无关，跟**那一行解码后的长度**有关。
+
+这个 hook 无法通过配置关闭（源码里 `Initialize()` 无条件调用）。治本要重编代理（改成按 `min()` 截断并返回真实长度），治标是缩短单行长度。
+
+---
+
+## ✅ 验证清单
+
+- [ ] 原包 / 原脚本已备份；带签名的包已挪走 `.sig`
+- [ ] 回写报告：行数不变、未匹配条目 = 0
+- [ ] 重打包后 `usz` / `csz` / adler 与内容一致
+- [ ] `sjis_ext.bin` 大小 = 汉字数 × 2，UTF-16LE，顺序与编码一致
+- [ ] 代理 DLL 与 exe 位数一致，且覆盖了 exe 实际使用的绘制出口
 - [ ] 实机跑过：对白中文正常（窗口/全屏都试）
 
 ---
 
-## 环境记录
+## 🗂 本仓库的脚本
 
-- 验证环境：Windows x64，Python 3（仅标准库），VNTextProxy 的 `d3d9/winmm/version/ddraw`（版本未记录，2023-02 构建）
-- 案例：`data.xp3` 490 MB / 911 条目 / 59 个 `.ks` / 38 组译文 / 2450 句 / 612 个隧道汉字
-- 复现结果：同一份译文两次生成的 `sjis_ext.bin` 哈希一致（`52D1DE44…`），可复现
+`scripts/krr.py` 是 **KiriKiri 的参考实现**（XP3 解包/回写/重打包/校验），`scripts/extract.py` 是 KAG 对白提取器。
+换引擎时脚本不能直接复用，但里面的 `SjisTunnel` 编解码、行数校验、标签保护逻辑可以直接搬。
+
+---
+
+## 🌍 环境记录
+
+- 验证环境：Windows x64，Python 3（仅标准库），VNTextProxy 2023-02 构建
+- KiriKiri 案例复现：同一份译文两次生成的 `sjis_ext.bin` 哈希一致（`52D1DE44…`）
